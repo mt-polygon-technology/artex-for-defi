@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import importlib
 import json
 import os
 import platform
@@ -109,6 +110,35 @@ print(json.dumps({
             )
             self.assertEqual(again.returncode, 0, again.stderr)
             self.assertFalse(json.loads(again.stdout)["prior_state"])
+
+
+class CompilerWrapperTests(unittest.TestCase):
+    """The arm64 solc wrapper needs qemu, not Landlock, so test it separately."""
+
+    def test_arm64_solc_wrapper_uses_native_qemu(self) -> None:
+        if platform.machine() not in {"aarch64", "arm64"}:
+            self.skipTest("wrapper is only needed on arm64")
+        if shutil.which("qemu-x86_64") is None:
+            self.skipTest("qemu-x86_64 is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifacts = root / "tool" / ".solc-select" / "artifacts" / "solc-0.8.35"
+            artifacts.mkdir(parents=True)
+            # A minimal little-endian ELF64 header with e_machine=x86_64; the
+            # wrapper is inspected, not executed.
+            binary = artifacts / "solc-0.8.35"
+            binary.write_bytes(b"\x7fELF\x02\x01\x01" + b"\x00" * 11 + (62).to_bytes(2, "little") + b"\x00" * 32)
+            binary.chmod(0o755)
+            home = root / "sandbox-home"
+            home.mkdir()
+            launcher = importlib.import_module("sandbox_exec")
+            launcher.link_installed_compilers(root / "tool", home)
+            target = home / ".svm" / "0.8.35" / "solc-0.8.35"
+            self.assertTrue(target.is_file())
+            self.assertFalse(target.is_symlink())
+            wrapper = target.read_text()
+            self.assertIn("qemu-x86_64", wrapper)
+            self.assertIn(str(binary.resolve()), wrapper)
 
 
 if __name__ == "__main__":

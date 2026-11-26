@@ -241,8 +241,11 @@ def _add_verified_artifact(row: dict[str, Any], ref: str, root: str) -> None:
 
 def _record_ref(record: Path, artifact_root: Path, status: str, cid: str) -> tuple[str, str]:
     try:
+        # Resolve both sides before comparing: on macOS a temporary directory
+        # below /var is commonly reported as /private/var, so an unresolved
+        # record path can look unrelated to its already-resolved artifact root.
         root = artifact_root.resolve(strict=True)
-        candidate = record if record.is_absolute() else root / record
+        candidate = (record if record.is_absolute() else root / record).resolve(strict=True)
         relative = candidate.relative_to(root)
         blob = candidate.read_bytes()
     except (OSError, ValueError) as exc:

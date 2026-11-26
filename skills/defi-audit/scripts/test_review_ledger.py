@@ -105,6 +105,23 @@ class ReviewLedgerTests(unittest.TestCase):
         finally:
             fixture.doCleanups()
 
+    def test_record_path_accepts_resolved_and_unresolved_root_aliases(self) -> None:
+        fixture = test_evidence.EvidenceTests("test_reproduced_and_confirmed_gates")
+        fixture.setUp()
+        try:
+            record = copy.deepcopy(fixture.record)
+            record["detector_ids"] = ["ECO-04"]
+            path = fixture.root / "finding.json"
+            path.write_text(json.dumps(record))
+            # A caller may pass an unresolved path (for example, /var on macOS)
+            # while the artifact root has already been resolved by the ledger.
+            unresolved_root = Path(str(fixture.root))
+            ref, root = review_ledger._record_ref(path, unresolved_root, "reproduced", "ECO-04")
+            self.assertRegex(ref, r"finding\.json#sha256=[0-9a-f]{64}")
+            self.assertEqual(root, str(fixture.root.resolve(strict=True)))
+        finally:
+            fixture.doCleanups()
+
     def test_selected_only_and_observed_counters(self) -> None:
         ledger = self.fresh()
         with self.assertRaisesRegex(review_ledger.LedgerError, "not selected"):

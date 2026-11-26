@@ -5,15 +5,28 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// The fixed DeFi actions fail closed unless the Linux Landlock launcher is
+// available. Tests that exercise the real launcher are therefore Linux-only;
+// keep the fail-closed assertion in TestDeFiAnalysisRequiresSandboxForAllActions
+// running everywhere.
+func requireDeFiLandlock(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("DeFi analyzer sandbox requires Linux Landlock")
+	}
+}
 
 // The halmos action must be advertised and must build the expected run_analysis.py
 // invocation (run ... halmos ... --match-test/--match-contract passed through). A
 // stub runner echoes its argv so the Go-built command is asserted without needing
 // a real halmos/solver.
 func TestDeFiAnalysisHalmosActionBuildsRunnerInvocation(t *testing.T) {
+	requireDeFiLandlock(t)
 	skill := t.TempDir()
 	scripts := filepath.Join(skill, "defi-audit", "scripts")
 	if err := os.MkdirAll(scripts, 0o700); err != nil {
@@ -153,6 +166,7 @@ func TestDeFiAnalysisSnapshotRequiresTaskScopeBeforeRPC(t *testing.T) {
 }
 
 func TestDeFiAnalysisDeploymentBindUsesTaskArtifacts(t *testing.T) {
+	requireDeFiLandlock(t)
 	skill := t.TempDir()
 	scripts := filepath.Join(skill, "defi-audit", "scripts")
 	if err := os.MkdirAll(scripts, 0o700); err != nil {

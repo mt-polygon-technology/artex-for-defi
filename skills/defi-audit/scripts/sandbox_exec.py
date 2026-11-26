@@ -15,6 +15,7 @@ import ctypes.util
 import os
 import platform
 import re
+import shutil
 import socket
 import sys
 import uuid
@@ -138,13 +139,34 @@ def _add_path_rule(libc: ctypes.CDLL, ruleset_fd: int, path: Path,
         os.close(fd)
 
 
+def _is_x86_64_elf(path: Path) -> bool:
+    """Return True for an x86_64 ELF executable without relying on `file`."""
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(20)
+    except OSError:
+        return False
+    return (len(header) == 20 and header[:4] == b"\x7fELF"
+            and header[4] == 2 and header[5] == 1
+            and int.from_bytes(header[18:20], "little") == 62)
+
+
 def link_installed_compilers(tool_home: Path, sandbox_home: Path) -> None:
-    """Expose only already-installed solc binaries to Foundry's offline SVM."""
+    """Expose only already-installed solc binaries to Foundry's offline SVM.
+
+    On arm64 the Solidity project publishes only x86_64 Linux binaries. Foundry
+    invokes ``~/.svm/<version>/solc-<version>`` directly, which would otherwise
+    go through the host's binfmt/Rosetta handler. That handler needs
+    ``/proc/self/exe``, which Landlock intentionally does not grant. Install a
+    tiny native wrapper that execs qemu-x86_64 instead, so the compiler works
+    inside the confined process tree.
+    """
     svm = sandbox_home / ".svm"
     sources = []
     for directory in (tool_home / ".svm", tool_home / ".solc-select" / "artifacts"):
         if directory.is_dir():
             sources.extend(directory.iterdir())
+    qemu = shutil.which("qemu-x86_64")
     for directory in sources:
         if not directory.is_dir():
             continue
@@ -156,8 +178,14 @@ def link_installed_compilers(tool_home: Path, sandbox_home: Path) -> None:
             continue
         target = svm / version / f"solc-{version}"
         target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists():
-            target.symlink_to(binary.resolve(strict=True))
+        if target.exists():
+            continue
+        resolved = binary.resolve(strict=True)
+        if qemu and _is_x86_64_elf(resolved):
+            target.write_text("#!/bin/sh\nexec " + qemu + " " + str(resolved) + " \"$@\"\n", encoding="utf-8")
+            target.chmod(0o755)
+        else:
+            target.symlink_to(resolved)
 
 
 def restrict(project: Path, output: Path, script: Path, tool_home: Path) -> None:

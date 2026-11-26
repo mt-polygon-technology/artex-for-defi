@@ -11,6 +11,7 @@
 # Release 使用 --build-arg ARTEX_BINARY_SOURCE=prebuilt，复用校验过的发布二进制；
 # 默认仍从源码构建，无需下载任何预编译的 ARTEX 产物。
 ARG ARTEX_BINARY_SOURCE=source
+ARG TARGETARCH
 
 ########## 阶段 1：前端静态导出 ##########
 FROM --platform=$BUILDPLATFORM node:22-bookworm AS web
@@ -52,13 +53,56 @@ COPY dist/${TARGETARCH}/artex /out/artex
 
 FROM ${ARTEX_BINARY_SOURCE} AS binary
 
+# Halmos 0.3.3 declares a mandatory yices-solver package. PyPI publishes that
+# package only for linux/amd64, yet Halmos never imports it when invoked with
+# --solver z3 (the adapter always passes --solver z3). Install Halmos without
+# dependencies and list the runtime dependencies explicitly so arm64 does not
+# fail on an unused package. Keep this list in sync with halmos 0.3.3's metadata.
+FROM python:3.12-slim-bookworm AS python-tools-base
+ARG HALMOS_VERSION=0.3.3
+ARG FOUNDRY_VERSION=v1.7.1
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git \
+    && rm -rf /var/lib/apt/lists/*
+ENV PATH="/root/.foundry/bin:${PATH}"
+RUN bash -o pipefail -c 'curl -fsSL https://foundry.paradigm.xyz | bash' \
+    && foundryup --install "${FOUNDRY_VERSION}"
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install --no-deps "halmos==${HALMOS_VERSION}" \
+    && python3 -m pip install \
+       "sortedcontainers>=2.4.0" "toml>=0.10.2" \
+       "eth_hash[pysha3]>=0.7.0" "rich>=14.0.0,<14.1.0" \
+       "xxhash>=3.5.0" "psutil>=6.1.0" "requests>=2.32.3" \
+       "python-dotenv>=1.1.0"
+
+# amd64: z3-solver has a prebuilt manylinux wheel.
+FROM python-tools-base AS python-tools-amd64
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install "z3-solver==4.12.6.0"
+
+# arm64: z3-solver 4.12.6.0 has no linux/arm64 wheel, and solc is published only
+# for x86_64. Build Z3 with a temporary C++ toolchain, then run the x86_64 solc
+# through qemu-user (solc-select detects the qemu-x86_64 shim by name).
+FROM python-tools-base AS python-tools-arm64
+# The pip cache mount keeps the locally built Z3 wheel across image rebuilds;
+# compiling it takes several minutes on arm64.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake qemu-user \
+    && python3 -m pip install "z3-solver==4.12.6.0" \
+    && apt-get purge -y --auto-remove build-essential cmake \
+    && rm -rf /var/lib/apt/lists/*
+RUN ln -sf /usr/bin/qemu-x86_64 /usr/local/bin/qemu-x86_64
+
+FROM python-tools-${TARGETARCH} AS python-tools
+
 ########## 阶段 3：运行镜像（同原版：工具 + Playwright 预装）##########
 FROM python:3.12-slim-bookworm AS runtime
+ARG TARGETARCH
 ARG NPM_REGISTRY=https://registry.npmmirror.com
-ARG FOUNDRY_VERSION=v1.7.1
 ARG SLITHER_VERSION=0.11.5
 ARG SOLC_VERSION=0.8.35
-ARG HALMOS_VERSION=0.3.3
 # 与下方 MCP/CLI 的精确依赖对齐，避免工具寻找另一版未安装的 Chromium。
 ARG PLAYWRIGHT_VERSION=1.64.0-alpha-1790635538000
 ARG PLAYWRIGHT_MCP_VERSION=0.0.83
@@ -66,25 +110,36 @@ ARG PLAYWRIGHT_CLI_VERSION=0.1.22
 ARG PLAYWRIGHT_DOWNLOAD_HOST
 # npm 源可覆盖；浏览器默认使用官方 CDN，也可通过 build arg 指定镜像站。
 ENV npm_config_registry=$NPM_REGISTRY \
-    PLAYWRIGHT_DOWNLOAD_HOST=$PLAYWRIGHT_DOWNLOAD_HOST
+    PLAYWRIGHT_DOWNLOAD_HOST=$PLAYWRIGHT_DOWNLOAD_HOST \
+    PATH="/root/.foundry/bin:${PATH}"
 # 常用工具：ripgrep / curl / vim，加一批 recon 常备件（按需增删）。
 # Node 与前端构建统一使用 22.x，避免继续使用已结束维护的 20.x。
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates libseccomp2 ripgrep curl wget vim git jq unzip \
       dnsutils iputils-ping netcat-openbsd inetutils-telnet whois nmap z3 \
+    && if [ "$TARGETARCH" = "arm64" ]; then \
+         apt-get install -y --no-install-recommends qemu-user; \
+         ln -sf /usr/bin/qemu-x86_64 /usr/local/bin/qemu-x86_64; \
+       fi \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 # DeFi reviews need a compiler, project test runner, local EVM, static analyzer,
 # and a symbolic checker (halmos, with the z3 solver). Pin the tools so the same
 # source produces comparable evidence across runs.
-ENV PATH="/root/.foundry/bin:${PATH}"
-RUN bash -o pipefail -c 'curl -fsSL https://foundry.paradigm.xyz | bash' \
-    && foundryup --install "${FOUNDRY_VERSION}" \
-    && python3 -m pip install --no-cache-dir \
+# Bring in the per-architecture toolchain before the smoke checks below, so
+# forge/solc/halmos are available in this stage rather than only at the end.
+COPY --from=python-tools /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=python-tools /usr/local/bin/halmos /usr/local/bin/z3 /usr/local/bin/
+COPY --from=python-tools /root/.foundry /root/.foundry
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install \
        "slither-analyzer==${SLITHER_VERSION}" "solc-select==1.2.0" \
-       "jsonschema==4.26.0" "halmos==${HALMOS_VERSION}" \
+       "jsonschema==4.26.0" \
     && solc-select use "${SOLC_VERSION}" --always-install \
+    && mkdir -p "/root/.svm/${SOLC_VERSION}" \
+    && ln -sfn "/root/.solc-select/artifacts/solc-${SOLC_VERSION}/solc-${SOLC_VERSION}" \
+       "/root/.svm/${SOLC_VERSION}/solc-${SOLC_VERSION}" \
     && forge --version && cast --version && anvil --version \
     && slither --version && solc --version \
     && halmos --version && z3 --version

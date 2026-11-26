@@ -190,18 +190,26 @@ finally:
 '''
 
 DEFI_TOOL_CHECK = r'''
-import shutil, subprocess
-for name in ('forge', 'cast', 'anvil', 'slither', 'solc'):
+import platform, shutil, subprocess
+for name in ('forge', 'cast', 'anvil', 'slither', 'solc', 'halmos', 'z3'):
     assert shutil.which(name), f'{name} missing from runtime image'
     result = subprocess.run([name, '--version'], capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, (name, result.stderr)
 assert shutil.which('solc-select'), 'solc-select missing from runtime image'
 assert subprocess.run(['solc-select', 'versions'], capture_output=True, timeout=15).returncode == 0
+if platform.machine() == 'aarch64':
+    # PyPI has no z3-solver or solc wheel for Linux arm64. The image must build
+    # z3 and run the x86_64 solc through qemu-user, so verify both explicitly.
+    assert shutil.which('qemu-x86_64'), 'qemu-x86_64 missing on arm64'
+    import z3
+    assert z3.get_version_string() == '4.12.6', z3.get_version_string()
+    solc = subprocess.run(['solc', '--version'], capture_output=True, text=True, timeout=15)
+    assert '0.8.35' in solc.stdout, solc.stdout
 import jsonschema
 assert jsonschema.Draft202012Validator is not None
 catalog = '/app/skills/defi-audit/scripts/catalog.py'
 assert subprocess.run(['python3', catalog, 'validate'], capture_output=True, timeout=15).returncode == 0
-print('PASS DeFi review tools: Foundry, Slither, Solidity compiler and versioned catalog')
+print('PASS DeFi review tools: Foundry, Slither, Solidity, Halmos/Z3 and versioned catalog')
 '''
 
 

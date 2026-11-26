@@ -24,7 +24,7 @@ import (
 // reviewed contents and pass them to Python in memory so a changed on-disk file
 // cannot turn the sandbox step into an unrestricted tool call. Update the hash
 // deliberately when changing skills/defi-audit/scripts/sandbox_exec.py.
-const defiSandboxSHA256 = "08b9a26ef01d520770db2e456dc01aa4adc9ab394f0fa3a189bacff94679c7fc"
+const defiSandboxSHA256 = "ad5e4a7a96ab79169f8545387b05230af6867a6c828ac8edd25d4f006fd218ea"
 
 // defi_analysis is a fixed-action bridge to the shipped DeFi adapter. It never
 // accepts a shell command, executable path, RPC URL or output directory from the
